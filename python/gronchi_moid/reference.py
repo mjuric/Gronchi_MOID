@@ -511,6 +511,45 @@ def moid_gronchi(o1: Orbit, o2: Orbit, *,
 
 
 # -----------------------------------------------------------------------------
+# Earth elements via the Standish 1800-2050 secular fit
+# -----------------------------------------------------------------------------
+#
+# Linear approximation to the Earth-Moon barycenter osculating elements in the
+# J2000 mean ecliptic frame. Source: E. M. Standish, "Keplerian Elements for
+# Approximate Positions of the Major Planets" (JPL technical memo).
+#
+# Only the four MOID-relevant elements are returned (a, e, inc, Omega, omega);
+# mean anomaly is irrelevant to MOID.
+
+_STANDISH_J2000_MJD = 51544.5      # JD 2451545.0 - 2400000.5
+_STANDISH_CENTURY = 36525.0
+_EARTH_A0 = 1.00000261;     _EARTH_AD = 0.00000562
+_EARTH_E0 = 0.01671123;     _EARTH_ED = -0.00004392
+_EARTH_I0_DEG = -0.00001531;     _EARTH_ID_DEG = -0.01294668
+_EARTH_VARPI0_DEG = 102.93768193; _EARTH_VARPID_DEG = 0.32327364
+
+
+def earth_elements_standish(mjd):
+    """Earth-Moon-barycenter Keplerian elements at MJD (TDB).
+
+    Uses the Standish 1800-2050 linear secular fit. Returns
+    ``(a, e, inc, Omega, omega)`` with ``a`` in AU and angles in radians.
+    Accepts a scalar or numpy-array ``mjd``; returns matching shape (the
+    last axis has length 5 for array input).
+    """
+    mjd_arr = np.asarray(mjd, dtype=np.float64)
+    T = (mjd_arr - _STANDISH_J2000_MJD) / _STANDISH_CENTURY
+    a = _EARTH_A0 + _EARTH_AD * T
+    e = _EARTH_E0 + _EARTH_ED * T
+    inc = np.deg2rad(_EARTH_I0_DEG + _EARTH_ID_DEG * T)
+    Omega = np.zeros_like(T)
+    omega = np.mod(np.deg2rad(_EARTH_VARPI0_DEG + _EARTH_VARPID_DEG * T), TWOPI)
+    if mjd_arr.ndim == 0:
+        return float(a), float(e), float(inc), float(Omega), float(omega)
+    return np.stack([a, e, inc, Omega, omega], axis=-1)
+
+
+# -----------------------------------------------------------------------------
 # Example
 # -----------------------------------------------------------------------------
 

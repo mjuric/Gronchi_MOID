@@ -1,6 +1,6 @@
 """High-level numpy-array MOID API.
 
-Two entry points:
+Generic two-orbit entry points:
 
 * :func:`moid` — fast path, returns a 1-D ndarray of MOID distances.
 * :func:`moid_full` — returns a dict of arrays (moid, u1, u2, f1, f2, state1,
@@ -9,6 +9,12 @@ Two entry points:
 Both accept ``elements1`` / ``elements2`` shaped ``(N, 5)`` or ``(5,)`` holding
 ``[a, e, inc, Omega, omega]``. A shape-``(5,)`` orbit is broadcast against the
 other operand.
+
+Specialized Earth-MOID entry points (Earth's elements at the asteroid's epoch
+are evaluated inside the C++ kernel via the Standish 1800-2050 linear fit):
+
+* :func:`moid_earth` — returns a 1-D ndarray of MOID distances.
+* :func:`moid_earth_full` — also returns the per-row Earth elements used.
 """
 
 from __future__ import annotations
@@ -128,6 +134,85 @@ def moid_full(elements1, elements2, *, mu1=GM_SUN, mu2=GM_SUN,
     m1 = _broadcast_mu(mu1, n, "mu1")
     m2 = _broadcast_mu(mu2, n, "mu2")
     return _core._moid_batch_full(e1, e2, m1, m2, int(n_threads))
+
+
+def _broadcast_elements_mjd(elements, mjd):
+    e = _normalize_elements(elements, "elements")
+    m = np.atleast_1d(np.asarray(mjd, dtype=np.float64))
+    if m.ndim != 1:
+        raise ValueError("mjd must be a scalar or 1-D array")
+    if not np.isfinite(m).all():
+        raise ValueError("mjd contains non-finite values")
+    ne, nm = e.shape[0], m.shape[0]
+    if ne == nm:
+        n = ne
+    elif ne == 1:
+        e = np.broadcast_to(e, (nm, 5))
+        n = nm
+    elif nm == 1:
+        m = np.broadcast_to(m, (ne,))
+        n = ne
+    else:
+        raise ValueError(
+            f"elements and mjd lengths are incompatible: {ne} vs {nm}"
+        )
+    return np.ascontiguousarray(e), np.ascontiguousarray(m), n
+
+
+def moid_earth(elements, mjd, *, n_threads: int = 1) -> np.ndarray:
+    """Compute MOID against Earth at one or many asteroid epochs.
+
+    Earth's osculating elements at each ``mjd`` are evaluated in the C++
+    kernel via the Standish 1800-2050 linear fit (Earth-Moon barycenter,
+    J2000 mean ecliptic frame).
+
+    Parameters
+    ----------
+    elements : array_like
+        Asteroid Keplerian elements. Shape ``(5,)`` or ``(N, 5)`` of
+        ``[a, e, inc, Omega, omega]`` (AU + radians, J2000 ecliptic).
+    mjd : float or array_like
+        Modified Julian Date (TDB) of each asteroid orbit. Scalar or
+        shape ``(N,)``. Scalar broadcasts against ``elements``; a single
+        ``elements`` row broadcasts against an array ``mjd``.
+    n_threads : int, optional
+        OpenMP thread count. See :func:`moid`.
+
+    Returns
+    -------
+    moid : ndarray, shape (N,)
+        MOID in AU.
+    """
+    e, m, _ = _broadcast_elements_mjd(elements, mjd)
+    return _core._moid_batch_earth(e, m, int(n_threads))
+
+
+def moid_earth_full(elements, mjd, *, mu_ast=GM_SUN,
+                    n_threads: int = 1) -> dict:
+    """MOID against Earth plus auxiliary quantities.
+
+    Parameters
+    ----------
+    elements, mjd
+        See :func:`moid_earth`.
+    mu_ast : float or array_like, optional
+        Asteroid gravitational parameter (only affects velocity recovery).
+        Scalar or 1-D array of length N. Earth's ``mu`` is hard-wired to
+        :data:`GM_SUN`.
+    n_threads : int, optional
+        See :func:`moid`.
+
+    Returns
+    -------
+    result : dict
+        Same keys as :func:`moid_full` (with ``state1``/``f1``/``u1``
+        referring to Earth and ``state2``/``f2``/``u2`` to the asteroid),
+        plus ``earth_elements`` (N, 5) with the Standish-evaluated Earth
+        row used for each pair.
+    """
+    e, m, n = _broadcast_elements_mjd(elements, mjd)
+    mu_a = _broadcast_mu(mu_ast, n, "mu_ast")
+    return _core._moid_batch_earth_full(e, m, mu_a, int(n_threads))
 
 
 def has_openmp() -> bool:

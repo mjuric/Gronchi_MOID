@@ -1,5 +1,6 @@
 // pybind11 bindings: vectorized MOID over (N, 5) numpy arrays.
 #include "moid.hpp"
+#include "standish_earth.hpp"
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -153,6 +154,136 @@ py::dict moid_batch_full(py::array_t<double, py::array::c_style | py::array::for
     return out;
 }
 
+inline void check_ast_shape(const py::array_t<double>& ast) {
+    if (ast.ndim() != 2 || ast.shape(1) != 5)
+        throw std::invalid_argument("elements must have shape (N, 5)");
+}
+
+inline void check_mjd_shape(const py::array_t<double>& mjd, py::ssize_t N) {
+    if (mjd.ndim() != 1 || (mjd.shape(0) != N && mjd.shape(0) != 1))
+        throw std::invalid_argument("mjd must be 1-D of length N or 1");
+}
+
+py::array_t<double> moid_batch_earth(
+        py::array_t<double, py::array::c_style | py::array::forcecast> ast,
+        py::array_t<double, py::array::c_style | py::array::forcecast> mjd,
+        int n_threads) {
+    check_ast_shape(ast);
+    const py::ssize_t N = ast.shape(0);
+    check_mjd_shape(mjd, N);
+
+    py::array_t<double> out(N);
+    const double* pa = ast.data();
+    const double* pmjd = mjd.data();
+    const bool mjd_scalar = (mjd.shape(0) == 1);
+    double* po = out.mutable_data();
+
+    const int threads = resolve_threads(n_threads);
+    {
+        py::gil_scoped_release gil;
+#ifdef GRONCHI_USE_OPENMP
+        #pragma omp parallel for if(threads > 1) num_threads(threads) schedule(static)
+#endif
+        for (py::ssize_t i = 0; i < N; ++i) {
+            gronchi::EarthElements ee;
+            gronchi::earth_elements_at_mjd(pmjd[mjd_scalar ? 0 : i], ee);
+            gronchi::Orbit oe{ee.a, ee.e, ee.inc, ee.Omega, ee.omega,
+                              gronchi::GM_SUN_AUDAY2};
+            gronchi::Orbit oa = row_to_orbit(pa + 5*i, gronchi::GM_SUN_AUDAY2);
+            gronchi::MoidResult r;
+            gronchi::moid_pair(oe, oa, r);
+            po[i] = r.moid;
+        }
+    }
+    (void)threads;
+    return out;
+}
+
+py::dict moid_batch_earth_full(
+        py::array_t<double, py::array::c_style | py::array::forcecast> ast,
+        py::array_t<double, py::array::c_style | py::array::forcecast> mjd,
+        py::array_t<double, py::array::c_style | py::array::forcecast> mu_ast,
+        int n_threads) {
+    check_ast_shape(ast);
+    const py::ssize_t N = ast.shape(0);
+    check_mjd_shape(mjd, N);
+    if (mu_ast.ndim() != 1 || (mu_ast.shape(0) != N && mu_ast.shape(0) != 1))
+        throw std::invalid_argument("mu_ast must be 1-D of length N or 1");
+
+    py::array_t<double> moid_arr(N);
+    py::array_t<double> u1_arr(N);
+    py::array_t<double> u2_arr(N);
+    py::array_t<double> f1_arr(N);
+    py::array_t<double> f2_arr(N);
+    py::array_t<double> state1_arr({N, py::ssize_t(6)});
+    py::array_t<double> state2_arr({N, py::ssize_t(6)});
+    py::array_t<int8_t> status_arr(N);
+    py::array_t<double> earth_elem_arr({N, py::ssize_t(5)});
+
+    const double* pa = ast.data();
+    const double* pmjd = mjd.data();
+    const double* pmu = mu_ast.data();
+    const bool mjd_scalar = (mjd.shape(0) == 1);
+    const bool mu_scalar = (mu_ast.shape(0) == 1);
+    double* pmoid = moid_arr.mutable_data();
+    double* pu1 = u1_arr.mutable_data();
+    double* pu2 = u2_arr.mutable_data();
+    double* pf1 = f1_arr.mutable_data();
+    double* pf2 = f2_arr.mutable_data();
+    double* ps1 = state1_arr.mutable_data();
+    double* ps2 = state2_arr.mutable_data();
+    int8_t* pst = status_arr.mutable_data();
+    double* pee = earth_elem_arr.mutable_data();
+
+    const int threads = resolve_threads(n_threads);
+    {
+        py::gil_scoped_release gil;
+#ifdef GRONCHI_USE_OPENMP
+        #pragma omp parallel for if(threads > 1) num_threads(threads) schedule(static)
+#endif
+        for (py::ssize_t i = 0; i < N; ++i) {
+            gronchi::EarthElements ee;
+            gronchi::earth_elements_at_mjd(pmjd[mjd_scalar ? 0 : i], ee);
+            gronchi::Orbit oe{ee.a, ee.e, ee.inc, ee.Omega, ee.omega,
+                              gronchi::GM_SUN_AUDAY2};
+            const double mu_a = pmu[mu_scalar ? 0 : i];
+            gronchi::Orbit oa = row_to_orbit(pa + 5*i, mu_a);
+            gronchi::MoidResult r;
+            gronchi::moid_pair(oe, oa, r);
+            pmoid[i] = r.moid;
+            pu1[i] = r.u1;
+            pu2[i] = r.u2;
+            pf1[i] = r.f1;
+            pf2[i] = r.f2;
+            for (int k = 0; k < 3; ++k) {
+                ps1[6*i + k]     = r.r1[k];
+                ps1[6*i + 3 + k] = r.v1[k];
+                ps2[6*i + k]     = r.r2[k];
+                ps2[6*i + 3 + k] = r.v2[k];
+            }
+            pst[i] = r.status;
+            pee[5*i + 0] = ee.a;
+            pee[5*i + 1] = ee.e;
+            pee[5*i + 2] = ee.inc;
+            pee[5*i + 3] = ee.Omega;
+            pee[5*i + 4] = ee.omega;
+        }
+    }
+    (void)threads;
+
+    py::dict out;
+    out["moid"]            = std::move(moid_arr);
+    out["u1"]              = std::move(u1_arr);
+    out["u2"]              = std::move(u2_arr);
+    out["f1"]              = std::move(f1_arr);
+    out["f2"]              = std::move(f2_arr);
+    out["state1"]          = std::move(state1_arr);
+    out["state2"]          = std::move(state2_arr);
+    out["status"]          = std::move(status_arr);
+    out["earth_elements"]  = std::move(earth_elem_arr);
+    return out;
+}
+
 bool has_openmp() {
 #ifdef GRONCHI_USE_OPENMP
     return true;
@@ -170,6 +301,11 @@ PYBIND11_MODULE(_core, m) {
     m.def("_moid_batch_full", &moid_batch_full,
           py::arg("elements1"), py::arg("elements2"),
           py::arg("mu1"), py::arg("mu2"),
+          py::arg("n_threads") = 1);
+    m.def("_moid_batch_earth", &moid_batch_earth,
+          py::arg("elements"), py::arg("mjd"), py::arg("n_threads") = 1);
+    m.def("_moid_batch_earth_full", &moid_batch_earth_full,
+          py::arg("elements"), py::arg("mjd"), py::arg("mu_ast"),
           py::arg("n_threads") = 1);
     m.def("_has_openmp", &has_openmp);
     m.attr("GM_SUN_AUDAY2") = gronchi::GM_SUN_AUDAY2;

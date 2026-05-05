@@ -14,12 +14,22 @@ Quick usage:
     array([0.30...])
 """
 
-from ._api import GM_SUN, has_openmp, moid, moid_full, status_label
+from ._api import (
+    GM_SUN,
+    has_openmp,
+    moid,
+    moid_earth,
+    moid_earth_full,
+    moid_full,
+    status_label,
+)
 from . import reference
 
 __all__ = [
     "moid",
     "moid_full",
+    "moid_earth",
+    "moid_earth_full",
     "GM_SUN",
     "has_openmp",
     "status_label",
