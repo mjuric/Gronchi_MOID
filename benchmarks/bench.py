@@ -37,14 +37,18 @@ def main(argv=None):
 
     earth = np.array([1.0, 0.0167, 0.0, 0.0, 1.796767421])
     asts = _random_orbits(args.N, seed=0)
+    rng = np.random.default_rng(42)
+    j2000_mjd = 51544.5
+    mjds = rng.uniform(j2000_mjd - 50 * 365.25, j2000_mjd + 50 * 365.25, args.N)
 
     # warm-up
     gm.moid(earth, asts[:16])
+    gm.moid_earth(asts[:16], mjds[:16])
 
     print(f"OpenMP available: {gm.has_openmp()}")
     print(f"N = {args.N} pairs")
     print()
-    print(f"{'threads':>8}  {'time':>10}  {'pairs/sec':>12}  {'us/pair':>9}")
+    print(f"{'api':>12}  {'threads':>8}  {'time':>10}  {'pairs/sec':>12}  {'us/pair':>9}")
     for nt_str in args.threads.split(","):
         nt = int(nt_str)
         t0 = time.perf_counter()
@@ -52,7 +56,15 @@ def main(argv=None):
         dt = time.perf_counter() - t0
         rate = args.N / dt
         per = dt * 1e6 / args.N
-        print(f"{nt:>8}  {dt*1e3:>8.1f} ms  {rate:>12.0f}  {per:>7.2f}")
+        print(f"{'moid':>12}  {nt:>8}  {dt*1e3:>8.1f} ms  {rate:>12.0f}  {per:>7.2f}")
+    for nt_str in args.threads.split(","):
+        nt = int(nt_str)
+        t0 = time.perf_counter()
+        gm.moid_earth(asts, mjds, n_threads=nt)
+        dt = time.perf_counter() - t0
+        rate = args.N / dt
+        per = dt * 1e6 / args.N
+        print(f"{'moid_earth':>12}  {nt:>8}  {dt*1e3:>8.1f} ms  {rate:>12.0f}  {per:>7.2f}")
 
     if args.py_pairs > 0:
         n = min(args.py_pairs, args.N)
