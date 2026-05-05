@@ -1,0 +1,17 @@
+include LICENSE README.md pyproject.toml setup.py MANIFEST.in
+recursive-include src *.cpp *.hpp
+recursive-include third_party/eigen/Eigen *
+recursive-include third_party/eigen/unsupported/Eigen *
+recursive-include python *.py
+recursive-include tests *.py
+recursive-include benchmarks *.py
+prune third_party/eigen/test
+prune third_party/eigen/doc
+prune third_party/eigen/bench
+prune third_party/eigen/demos
+prune third_party/eigen/failtest
+prune third_party/eigen/scripts
+prune third_party/eigen/.git
+global-exclude __pycache__
+global-exclude *.pyc
+global-exclude .DS_Store
