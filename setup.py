@@ -83,6 +83,8 @@ extra_link_args += omp_link
 ext = Pybind11Extension(
     "gronchi_moid._core",
     sources=["src/_core.cpp"],
+    # header-only core: rebuild when any header changes
+    depends=[str(p) for p in sorted((ROOT / "src").glob("*.hpp"))],
     include_dirs=["src", str(EIGEN_DIR)],
     cxx_std=17,
     define_macros=[("EIGEN_MPL2_ONLY", "1"), *omp_defines],

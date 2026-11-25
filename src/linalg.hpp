@@ -49,11 +49,19 @@ inline void solve_vandermonde17(const cd* ts, const cd* ys, cd* out) {
 // Companion matrix in real arithmetic; eigenvalues whose imag part is small
 // relative to the magnitude are taken as real roots. After collecting, the
 // roots are sorted and near-duplicates are removed.
+//
+// tol_imag is deliberately loose: a k-fold real root (tangent orbits,
+// symmetric or near-circular coplanar configurations) splits under rounding
+// into complex roots with imaginary parts ~ eps^(1/k), i.e. ~1e-4 for k = 4. Spurious candidates are rejected later by
+// the critical-point residual test, so accepting them here is safe.
 inline std::vector<double> real_roots_real_poly(const double* c_asc, int deg,
-                                                double tol_imag = 1e-8,
+                                                double tol_imag = 1e-2,
                                                 double tol_dedup = 1e-7) {
-    // trim leading near-zero coefficients in descending order
-    while (deg > 0 && std::abs(c_asc[deg]) < 1e-14) --deg;
+    // trim leading near-zero coefficients (relative to the largest one)
+    double cmax = 0.0;
+    for (int i = 0; i <= deg; ++i) cmax = std::max(cmax, std::abs(c_asc[i]));
+    if (!(cmax > 0.0)) return {};
+    while (deg > 0 && std::abs(c_asc[deg]) < 1e-14 * cmax) --deg;
     if (deg <= 0) return {};
 
     if (deg == 1) {

@@ -19,7 +19,7 @@ A 1:1 Python translation of the algorithm is preserved as
 ## Installation
 
 ```bash
-git clone --recurse-submodules https://github.com/mjuric/gronchi_moid.git
+git clone --recurse-submodules https://github.com/eggls6/gronchi_moid.git
 cd gronchi_moid
 pip install .
 ```

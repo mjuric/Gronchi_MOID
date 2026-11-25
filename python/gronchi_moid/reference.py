@@ -24,8 +24,8 @@ sin = np.sin
 cos = np.cos
 norm = np.linalg.norm
 sqrt = np.sqrt
-atan = np.atan
-atan2 = np.atan2
+atan = np.arctan    # np.atan / np.atan2 exist only in NumPy >= 2
+atan2 = np.arctan2
 hypot = np.hypot
 
 
@@ -278,23 +278,38 @@ def _det_shat_eval(t: complex, alpha: np.ndarray, beta: np.ndarray, gamma: np.nd
     return complex(np.linalg.det(M))
 
 
-def _interpolate_degree_16(eval_fn) -> np.ndarray:
-    """Return ascending monomial coefficients c[0] + c[1] t + ... + c[16] t^16."""
+def _interpolate_degree_16(eval_fn, coeff_scale: Optional[float] = None) -> Optional[np.ndarray]:
+    """Return ascending monomial coefficients c[0] + c[1] t + ... + c[16] t^16.
+
+    Returns None if the determinant vanishes identically to rounding (degenerate
+    configuration with a continuum of critical points, e.g. concentric coplanar
+    circles). ``coeff_scale`` is the largest coefficient of the polynomial blocks.
+    """
     n = 17
     rho = 1.2  # slightly away from singular points at t=±i
     ts = np.array([rho * np.exp(2j * np.pi * k / n) for k in range(n)], dtype=complex)
     ys = np.array([eval_fn(t) for t in ts], dtype=complex)
+    if coeff_scale is not None:
+        scale = (coeff_scale * max(1.0, rho) ** 4) ** 6
+        if not np.max(np.abs(ys)) > 1e-12 * scale:
+            return None
     V = np.vander(ts, N=n, increasing=True)
     c = np.linalg.solve(V, ys)
     c = np.real_if_close(c, tol=1e5)
     return np.asarray(c, dtype=complex)
 
 
-def _roots_real_from_poly(coeffs_asc: np.ndarray, tol_imag: float = 1e-8) -> np.ndarray:
+def _roots_real_from_poly(coeffs_asc: np.ndarray, tol_imag: float = 1e-2) -> np.ndarray:
+    # Loose imaginary-part tolerance: a k-fold real root (tangent orbits, symmetric
+    # or near-circular coplanar configurations) splits under rounding into complex
+    # roots with imaginary parts ~ eps^(1/k), i.e. ~1e-4 for k = 4. Spurious candidates are rejected by the residual test.
     coeffs_desc = np.array(coeffs_asc[::-1], dtype=complex)
     # trim leading tiny coefficients
     idx = 0
-    while idx < len(coeffs_desc) - 1 and abs(coeffs_desc[idx]) < 1e-14:
+    cmax = float(np.max(np.abs(coeffs_desc)))
+    if not cmax > 0.0:
+        return np.array([], dtype=float)
+    while idx < len(coeffs_desc) - 1 and abs(coeffs_desc[idx]) < 1e-14 * cmax:
         idx += 1
     coeffs_desc = coeffs_desc[idx:]
     roots = np.roots(coeffs_desc)
@@ -317,39 +332,6 @@ def _roots_real_from_poly(coeffs_asc: np.ndarray, tol_imag: float = 1e-8) -> np.
 # Recover (u1,u2) from polynomial roots
 # -----------------------------------------------------------------------------
 
-def _solve_s_from_pq(t: float, alpha: np.ndarray, beta: np.ndarray, gamma: np.ndarray,
-                     A: np.ndarray, B: np.ndarray, D: np.ndarray) -> Optional[float]:
-    a = _peval(alpha, t)
-    b = _peval(beta, t)
-    g = _peval(gamma, t)
-    Ap = _peval(A, t)
-    Bp = _peval(B, t)
-    Dp = _peval(D, t)
-
-    coeffs = np.array([a, b, g], dtype=complex)
-    # Handle degeneracy gracefully.
-    if abs(a) < 1e-14 and abs(b) < 1e-14:
-        return None
-    if abs(a) < 1e-14:
-        roots = np.array([-g / b], dtype=complex)
-    else:
-        roots = np.roots(np.array([a, b, g], dtype=complex))
-
-    best_s = None
-    best_res = float('inf')
-    for s in roots:
-        qv = Ap * s**4 + Bp * s**3 + Dp * s - Ap
-        res = abs(qv)
-        if res < best_res:
-            best_res = res
-            best_s = s
-    if best_s is None:
-        return None
-    if abs(best_s.imag) > 1e-7 * max(1.0, abs(best_s.real)):
-        return None
-    return float(best_s.real)
-
-
 def _gradients_eq4(o1: Orbit, o2: Orbit, u1: float, u2: float) -> Tuple[float, float]:
     A1, _, A3, A4, _, A6, A7, A8, A9, A10, A11, A12, A13, A14 = _A_coeffs(o1, o2)
     su1, cu1 = sin(u1), cos(u1)
@@ -359,66 +341,122 @@ def _gradients_eq4(o1: Orbit, o2: Orbit, u1: float, u2: float) -> Tuple[float, f
     return g1, g2
 
 
-def _classify_point(points: List[Tuple[float, float, float]]) -> List[str]:
-    # Hessian via finite differences for type classification.
-    out = []
-    for _, _, lam in points:
-        if lam > 1e-10:
-            out.append("minimum")
-        elif lam < -1e-10:
-            out.append("maximum")
-        else:
-            out.append("saddle/degenerate")
-    return out
+def _grad_scale(o1: Orbit, o2: Orbit) -> float:
+    """Residuals of eq. (4) scale like a^2; dividing makes them dimensionless."""
+    return max(o1.a, o2.a) ** 2
+
+
+def _jacobian_eq4(o1: Orbit, o2: Orbit, u1: float, u2: float) -> np.ndarray:
+    A1, _, A3, A4, _, A6, A7, A8, A9, A10, A11, A12, A13, A14 = _A_coeffs(o1, o2)
+    s1, c1 = sin(u1), cos(u1)
+    s2, c2 = sin(u2), cos(u2)
+    j11 = 2*(A1 - A3)*(c1*c1 - s1*s1) - A7*s1*s2 - A8*s1*c2 - A9*c1*s2 - A10*c1*c2 - A11*s1 - A12*c1
+    j12 = A7*c1*c2 - A8*c1*s2 - A9*s1*c2 + A10*s1*s2
+    j22 = 2*(A4 - A6)*(c2*c2 - s2*s2) - A7*s1*s2 - A8*s1*c2 - A9*c1*s2 - A10*c1*c2 - A13*s2 - A14*c2
+    return np.array([[j11, j12], [j12, j22]])
 
 
 def _hessian_signature(o1: Orbit, o2: Orbit, u1: float, u2: float) -> float:
-    h = 1e-6
-    f00 = distance_squared(o1, o2, u1, u2)
-    fpp = distance_squared(o1, o2, u1 + h, u2)
-    fmm = distance_squared(o1, o2, u1 - h, u2)
-    gpp = distance_squared(o1, o2, u1, u2 + h)
-    gmm = distance_squared(o1, o2, u1, u2 - h)
-    fxy1 = distance_squared(o1, o2, u1 + h, u2 + h)
-    fxy2 = distance_squared(o1, o2, u1 + h, u2 - h)
-    fxy3 = distance_squared(o1, o2, u1 - h, u2 + h)
-    fxy4 = distance_squared(o1, o2, u1 - h, u2 - h)
-    fuu = (fpp - 2*f00 + fmm) / (h*h)
-    fvv = (gpp - 2*f00 + gmm) / (h*h)
-    fuv = (fxy1 - fxy2 - fxy3 + fxy4) / (4*h*h)
-    H = np.array([[fuu, fuv], [fuv, fvv]])
+    """Sign pattern of the analytic Hessian of d^2(u1, u2).
+
+    Returns +1 (minimum), -1 (maximum) or 0 (saddle/degenerate). Unlike finite
+    differences this does not depend on the length unit of ``a``.
+    """
+    def derivs(o, u):
+        P, Q = _frame_vectors(o)
+        b = o.a * sqrt(1.0 - o.e * o.e)
+        X = o.a * (cos(u) - o.e) * P + b * sin(u) * Q
+        dX = -o.a * sin(u) * P + b * cos(u) * Q
+        ddX = -o.a * cos(u) * P - b * sin(u) * Q
+        return X, dX, ddX
+    X1, d1, dd1 = derivs(o1, u1)
+    X2, d2, dd2 = derivs(o2, u2)
+    r = X1 - X2
+    H = 2.0 * np.array([[dot(d1, d1) + dot(dd1, r), -dot(d1, d2)],
+                        [-dot(d1, d2), dot(d2, d2) - dot(dd2, r)]])
     eig = np.linalg.eigvalsh(H)
-    if eig[0] > 0 and eig[1] > 0:
+    tol = 1e-10 * _grad_scale(o1, o2)
+    if eig[0] > tol and eig[1] > tol:
         return 1.0
-    if eig[0] < 0 and eig[1] < 0:
+    if eig[0] < -tol and eig[1] < -tol:
         return -1.0
     return 0.0
 
 
-def _recover_candidates(o1: Orbit, o2: Orbit, coeffs, shift: float = 0.0) -> List[CriticalPoint]:
+def _solve_u2_given_u1(o1: Orbit, o2: Orbit, u1: float) -> List[float]:
+    """First equation of (4) is linear in (cos u2, sin u2) for fixed u1:
+    Ac cos u2 + Bc sin u2 + Cc = 0 (cf. Sect. 3.1 of the paper).
+
+    Solving for the angle directly avoids s = tan(u2/2), which diverges at
+    u2 = pi and made those critical points unrecoverable. Returns the best
+    branch first, plus the second branch if it also satisfies eq. 2 of (4).
+    """
+    A1, _, A3, _, _, _, A7, A8, A9, A10, A11, A12, _, _ = _A_coeffs(o1, o2)
+    su, cu = sin(u1), cos(u1)
+    Ac = A8 * cu - A10 * su
+    Bc = A7 * cu - A9 * su
+    Cc = 2 * (A1 - A3) * su * cu + A11 * cu - A12 * su
+    R = hypot(Ac, Bc)
+    if not R > 0.0:
+        return []
+    x = -Cc / R
+    if abs(x) > 1.0 + 1e-8:
+        return []
+    x = min(1.0, max(-1.0, x))
+    phi = atan2(Bc, Ac)
+    dphi = np.arccos(x)
+    cands = [float((phi + dphi) % TWOPI), float((phi - dphi) % TWOPI)]
+    sc = _grad_scale(o1, o2)
+    res = [abs(_gradients_eq4(o1, o2, u1, u2)[1]) / sc for u2 in cands]
+    ib = 0 if res[0] <= res[1] else 1
+    out = [cands[ib]]
+    if res[1 - ib] < 1e-3:
+        out.append(cands[1 - ib])
+    return out
+
+
+def _newton_polish(o1: Orbit, o2: Orbit, u1: float, u2: float,
+                   iters: int = 3, max_step: float = 1e-2) -> Tuple[float, float]:
+    for _ in range(iters):
+        g = np.array(_gradients_eq4(o1, o2, u1, u2))
+        J = _jacobian_eq4(o1, o2, u1, u2)
+        det = J[0, 0] * J[1, 1] - J[0, 1] * J[1, 0]
+        if not abs(det) > 0.0:
+            break
+        du = -np.array([J[1, 1] * g[0] - J[0, 1] * g[1],
+                        -J[1, 0] * g[0] + J[0, 0] * g[1]]) / det
+        if not np.all(np.isfinite(du)) or np.max(np.abs(du)) > max_step:
+            break
+        u1, u2 = u1 + du[0], u2 + du[1]
+    return float(u1 % TWOPI), float(u2 % TWOPI)
+
+
+def _recover_candidates(o1: Orbit, o2: Orbit, coeffs, shift: float = 0.0) -> Optional[List[CriticalPoint]]:
+    """Critical points from the roots of det(S^). None if degenerate."""
     alpha, beta, gamma, A, B, D = coeffs
-    poly = _interpolate_degree_16(lambda t: _det_shat_eval(t, alpha, beta, gamma, A, B, D))
+    cmax = max(float(np.max(np.abs(c))) for c in coeffs)
+    poly = _interpolate_degree_16(lambda t: _det_shat_eval(t, alpha, beta, gamma, A, B, D),
+                                  coeff_scale=cmax)
+    if poly is None:
+        return None
     poly = np.real_if_close(poly, tol=1e5)
     roots_t = _roots_real_from_poly(poly)
 
+    sc = _grad_scale(o1, o2)
     cand: List[CriticalPoint] = []
     for t in roots_t:
-        s = _solve_s_from_pq(t, alpha, beta, gamma, A, B, D)
-        if s is None:
-            continue
-        u1 = 2.0 * atan(t) + shift
-        u2 = 2.0 * atan(s)
-        u1 = float((u1 + TWOPI) % TWOPI)
-        u2 = float((u2 + TWOPI) % TWOPI)
-        g1, g2 = _gradients_eq4(o1, o2, u1, u2)
-        d2 = distance_squared(o1, o2, u1, u2)
-        cand.append(CriticalPoint(
-            u1=u1,
-            u2=u2,
-            distance=sqrt(max(d2, 0.0)),
-            distance2=d2,
-            grad_norm=hypot(g1, g2),
-        ))
+        u1 = float((2.0 * atan(t) + shift) % TWOPI)
+        for u2 in _solve_u2_given_u1(o1, o2, u1):
+            v1, v2 = _newton_polish(o1, o2, u1, u2)
+            g1, g2 = _gradients_eq4(o1, o2, v1, v2)
+            d2 = distance_squared(o1, o2, v1, v2)
+            cand.append(CriticalPoint(
+                u1=v1,
+                u2=v2,
+                distance=sqrt(max(d2, 0.0)),
+                distance2=d2,
+                grad_norm=hypot(g1, g2) / sc,
+            ))
     return _deduplicate_candidates(o1, o2, cand)
 
 
@@ -460,22 +498,43 @@ def moid_gronchi(o1: Orbit, o2: Orbit, *,
     o1, o2
         Elliptic orbits with angles in radians.
     use_shift
-        If True, retry once with an angular shift for improved numerical stability.
+        If True, retry with an angular shift (and merge the results) when no
+        candidate passes the residual test or the Weierstrass check fails
+        (no minimum or no maximum among the accepted critical points).
     shift_angle
         Optional manual shift angle s1 (radians). If None and shift is used, pi/3 is applied.
     max_candidate_grad_norm
-        Acceptance threshold for the residual of the critical-point equations.
+        Acceptance threshold for the residual of the critical-point equations,
+        made dimensionless by dividing by max(a1, a2)**2.
     """
     coeffs = _poly_coeffs_unshifted(o1, o2)
     cand = _recover_candidates(o1, o2, coeffs, shift=0.0)
+    if cand is None:
+        # Degenerate (det(S^) == 0). Only closed-form case handled: coincident orbits.
+        P1, Q1 = _frame_vectors(o1)
+        P2, Q2 = _frame_vectors(o2)
+        tol = 1e-12
+        if (abs(o1.a - o2.a) <= tol * max(o1.a, o2.a) and abs(o1.e - o2.e) <= tol
+                and np.abs(P1 - P2).sum() <= tol and np.abs(Q1 - Q2).sum() <= tol):
+            d2 = distance_squared(o1, o2, 0.0, 0.0)
+            cand = [CriticalPoint(u1=0.0, u2=0.0, distance=sqrt(max(d2, 0.0)),
+                                  distance2=d2, grad_norm=0.0, kind="minimum")]
+        else:
+            raise RuntimeError("Degenerate configuration (continuum of critical points, "
+                               "e.g. concentric coplanar circles).")
     good = [c for c in cand if c.grad_norm <= max_candidate_grad_norm]
 
+    def _weierstrass_ok(pts):
+        kinds = {c.kind for c in pts}
+        return "minimum" in kinds and "maximum" in kinds
+
     used_shift = False
-    if (not good) and use_shift:
+    if use_shift and not _weierstrass_ok(good):
         used_shift = True
         s1 = float(pi / 3 if shift_angle is None else shift_angle)
         coeffs2 = _poly_coeffs_shifted(o1, o2, s1)
-        cand = _recover_candidates(o1, o2, coeffs2, shift=s1)
+        cand2 = _recover_candidates(o1, o2, coeffs2, shift=s1) or []
+        cand = _deduplicate_candidates(o1, o2, cand + cand2)
         good = [c for c in cand if c.grad_norm <= max_candidate_grad_norm]
 
     if not good:
@@ -555,12 +614,13 @@ def earth_elements_standish(mjd):
 
 if __name__ == "__main__":
     # Simple smoke test on two mildly inclined, non-circular ellipses.
-    earth_like = Orbit(a=1.0, e=0.0167, inc=0.0, Omega=0.0, omega=1.796767421)  # rad
-    test_ast = Orbit(a=1.4, e=0.23, inc=0.15, Omega=0.4, omega=1.1)
+    mu = 2.9591220828559115e-04
+    earth_like = Orbit(a=1.0, e=0.0167, inc=0.0, Omega=0.0, omega=1.796767421, mu=mu)  # rad
+    test_ast = Orbit(a=1.4, e=0.23, inc=0.15, Omega=0.4, omega=1.1, mu=mu)
     res = moid_gronchi(earth_like, test_ast)
     print(f"MOID = {res.moid:.12f}")
     print(f"u1 = {res.u1:.12f}, u2 = {res.u2:.12f}")
     print(f"used_shift = {res.used_shift}")
     print("Critical points:")
     for cp in res.critical_points:
-        print(f"  kind={cp.kind:17s} d={cp.distance:.12f} f1={cp.f1:.12f} f2={cp.f2:.12f} |grad|={cp.grad_norm:.3e}")
+        print(f"  kind={cp.kind:17s} d={cp.distance:.12f} u1={cp.u1:.12f} u2={cp.u2:.12f} |grad|={cp.grad_norm:.3e}")
